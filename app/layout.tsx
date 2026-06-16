@@ -1,8 +1,9 @@
 import "./globals.css";
 import type { Metadata, Viewport } from "next";
+import { APP_NAME } from "@/lib/config";
 
 export const metadata: Metadata = {
-  title: "Propulsa · CRM Personal",
+  title: `${APP_NAME} · CRM Personal`,
   description: "Plataforma para organizar tu día a día.",
 };
 
