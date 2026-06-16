@@ -1,4 +1,8 @@
 # CRM-Personal
+
+> Nota Supabase: esta version esta preparada para usar Supabase como base de datos
+> remota. Sigue `SUPABASE_SETUP.md` para crear tablas, configurar variables y
+> desplegar.
 Plataforma de gestión personal
 
 # Iker · CRM Personal

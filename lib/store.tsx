@@ -7,6 +7,7 @@ import {
   useEffect,
   useState,
 } from "react";
+import { CrmAction } from "./crm-actions";
 import {
   Cliente,
   CrmData,
@@ -19,12 +20,11 @@ import {
 import { SEED } from "./seed";
 import { genId } from "./format";
 
-const STORAGE_KEY = "crm_personal_data_v1";
-
 const EMPTY: CrmData = { clientes: [], proyectos: [], tareas: [], eventos: [] };
 
 interface StoreCtx {
   hydrated: boolean;
+  syncError: string | null;
   data: CrmData;
   // Clientes
   addCliente: (c: Omit<Cliente, "id">) => void;
@@ -50,128 +50,244 @@ interface StoreCtx {
 
 const Ctx = createContext<StoreCtx | null>(null);
 
+function normalizeData(data: CrmData): CrmData {
+  return {
+    clientes: data.clientes ?? [],
+    proyectos: data.proyectos ?? [],
+    tareas: data.tareas ?? [],
+    eventos: data.eventos ?? [],
+  };
+}
+
+async function fetchCrmData(): Promise<CrmData> {
+  const res = await fetch("/api/crm", { cache: "no-store" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "No se pudieron cargar los datos");
+  }
+  return normalizeData((await res.json()) as CrmData);
+}
+
+async function sendAction(action: CrmAction): Promise<void> {
+  const res = await fetch("/api/crm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(action),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "No se pudo guardar el cambio");
+  }
+}
+
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [data, setData] = useState<CrmData>(EMPTY);
   const [hydrated, setHydrated] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
-  // Carga inicial desde localStorage (solo en cliente).
+  const refreshFromServer = useCallback(async () => {
+    const remoteData = await fetchCrmData();
+    setData(remoteData);
+  }, []);
+
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as CrmData;
-        setData({
-          clientes: parsed.clientes ?? [],
-          proyectos: parsed.proyectos ?? [],
-          tareas: parsed.tareas ?? [],
-          eventos: parsed.eventos ?? [],
-        });
-      } else {
-        setData(SEED);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(SEED));
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const remoteData = await fetchCrmData();
+        if (!cancelled) {
+          setData(remoteData);
+          setSyncError(null);
+        }
+      } catch (error) {
+        console.error("[store] load", error);
+        if (!cancelled) {
+          setData(EMPTY);
+          setSyncError("No se pudieron cargar los datos de Supabase.");
+        }
+      } finally {
+        if (!cancelled) setHydrated(true);
       }
-    } catch {
-      setData(SEED);
     }
-    setHydrated(true);
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Persiste en cada cambio (una vez hidratado).
-  useEffect(() => {
-    if (!hydrated) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    } catch {
-      /* almacenamiento lleno o no disponible */
-    }
-  }, [data, hydrated]);
+  const queueAction = useCallback(
+    (action: CrmAction) => {
+      setSyncError(null);
+      void sendAction(action).catch(async (error) => {
+        console.error("[store] sync", error);
+        setSyncError("No se pudo sincronizar el ultimo cambio.");
+        try {
+          await refreshFromServer();
+        } catch (refreshError) {
+          console.error("[store] refresh", refreshError);
+        }
+      });
+    },
+    [refreshFromServer],
+  );
 
-  // ── Clientes ──────────────────────────────────────────────
-  const addCliente = useCallback((c: Omit<Cliente, "id">) => {
-    setData((d) => ({ ...d, clientes: [{ ...c, id: genId() }, ...d.clientes] }));
-  }, []);
-  const updateCliente = useCallback((id: string, c: Partial<Cliente>) => {
-    setData((d) => ({
-      ...d,
-      clientes: d.clientes.map((x) => (x.id === id ? { ...x, ...c } : x)),
-    }));
-  }, []);
-  const removeCliente = useCallback((id: string) => {
-    setData((d) => ({ ...d, clientes: d.clientes.filter((x) => x.id !== id) }));
-  }, []);
+  // Clientes
+  const addCliente = useCallback(
+    (c: Omit<Cliente, "id">) => {
+      const cliente = { ...c, id: genId() };
+      setData((d) => ({ ...d, clientes: [cliente, ...d.clientes] }));
+      queueAction({ type: "addCliente", cliente });
+    },
+    [queueAction],
+  );
+  const updateCliente = useCallback(
+    (id: string, c: Partial<Cliente>) => {
+      setData((d) => ({
+        ...d,
+        clientes: d.clientes.map((x) => (x.id === id ? { ...x, ...c } : x)),
+      }));
+      queueAction({ type: "updateCliente", id, cliente: c });
+    },
+    [queueAction],
+  );
+  const removeCliente = useCallback(
+    (id: string) => {
+      setData((d) => ({
+        ...d,
+        clientes: d.clientes.filter((x) => x.id !== id),
+      }));
+      queueAction({ type: "removeCliente", id });
+    },
+    [queueAction],
+  );
 
-  // ── Proyectos ─────────────────────────────────────────────
-  const addProyecto = useCallback((p: Omit<Proyecto, "id" | "createdAt">) => {
-    setData((d) => ({
-      ...d,
-      proyectos: [
-        { ...p, id: genId(), createdAt: new Date().toISOString().slice(0, 10) },
-        ...d.proyectos,
-      ],
-    }));
-  }, []);
-  const updateProyecto = useCallback((id: string, p: Partial<Proyecto>) => {
-    setData((d) => ({
-      ...d,
-      proyectos: d.proyectos.map((x) => (x.id === id ? { ...x, ...p } : x)),
-    }));
-  }, []);
-  const removeProyecto = useCallback((id: string) => {
-    setData((d) => ({ ...d, proyectos: d.proyectos.filter((x) => x.id !== id) }));
-  }, []);
-  const moveProyecto = useCallback((id: string, estado: EstadoProyecto) => {
-    setData((d) => ({
-      ...d,
-      proyectos: d.proyectos.map((x) => (x.id === id ? { ...x, estado } : x)),
-    }));
-  }, []);
+  // Proyectos
+  const addProyecto = useCallback(
+    (p: Omit<Proyecto, "id" | "createdAt">) => {
+      const proyecto = {
+        ...p,
+        id: genId(),
+        createdAt: new Date().toISOString().slice(0, 10),
+      };
+      setData((d) => ({ ...d, proyectos: [proyecto, ...d.proyectos] }));
+      queueAction({ type: "addProyecto", proyecto });
+    },
+    [queueAction],
+  );
+  const updateProyecto = useCallback(
+    (id: string, p: Partial<Proyecto>) => {
+      setData((d) => ({
+        ...d,
+        proyectos: d.proyectos.map((x) => (x.id === id ? { ...x, ...p } : x)),
+      }));
+      queueAction({ type: "updateProyecto", id, proyecto: p });
+    },
+    [queueAction],
+  );
+  const removeProyecto = useCallback(
+    (id: string) => {
+      setData((d) => ({
+        ...d,
+        proyectos: d.proyectos.filter((x) => x.id !== id),
+      }));
+      queueAction({ type: "removeProyecto", id });
+    },
+    [queueAction],
+  );
+  const moveProyecto = useCallback(
+    (id: string, estado: EstadoProyecto) => {
+      setData((d) => ({
+        ...d,
+        proyectos: d.proyectos.map((x) => (x.id === id ? { ...x, estado } : x)),
+      }));
+      queueAction({ type: "moveProyecto", id, estado });
+    },
+    [queueAction],
+  );
 
-  // ── Tareas ────────────────────────────────────────────────
-  const addTarea = useCallback((t: Omit<Tarea, "id" | "createdAt">) => {
-    setData((d) => ({
-      ...d,
-      tareas: [
-        { ...t, id: genId(), createdAt: new Date().toISOString().slice(0, 10) },
-        ...d.tareas,
-      ],
-    }));
-  }, []);
-  const updateTarea = useCallback((id: string, t: Partial<Tarea>) => {
-    setData((d) => ({
-      ...d,
-      tareas: d.tareas.map((x) => (x.id === id ? { ...x, ...t } : x)),
-    }));
-  }, []);
-  const removeTarea = useCallback((id: string) => {
-    setData((d) => ({ ...d, tareas: d.tareas.filter((x) => x.id !== id) }));
-  }, []);
-  const moveTarea = useCallback((id: string, estado: EstadoTarea) => {
-    setData((d) => ({
-      ...d,
-      tareas: d.tareas.map((x) => (x.id === id ? { ...x, estado } : x)),
-    }));
-  }, []);
+  // Tareas
+  const addTarea = useCallback(
+    (t: Omit<Tarea, "id" | "createdAt">) => {
+      const tarea = {
+        ...t,
+        id: genId(),
+        createdAt: new Date().toISOString().slice(0, 10),
+      };
+      setData((d) => ({ ...d, tareas: [tarea, ...d.tareas] }));
+      queueAction({ type: "addTarea", tarea });
+    },
+    [queueAction],
+  );
+  const updateTarea = useCallback(
+    (id: string, t: Partial<Tarea>) => {
+      setData((d) => ({
+        ...d,
+        tareas: d.tareas.map((x) => (x.id === id ? { ...x, ...t } : x)),
+      }));
+      queueAction({ type: "updateTarea", id, tarea: t });
+    },
+    [queueAction],
+  );
+  const removeTarea = useCallback(
+    (id: string) => {
+      setData((d) => ({ ...d, tareas: d.tareas.filter((x) => x.id !== id) }));
+      queueAction({ type: "removeTarea", id });
+    },
+    [queueAction],
+  );
+  const moveTarea = useCallback(
+    (id: string, estado: EstadoTarea) => {
+      setData((d) => ({
+        ...d,
+        tareas: d.tareas.map((x) => (x.id === id ? { ...x, estado } : x)),
+      }));
+      queueAction({ type: "moveTarea", id, estado });
+    },
+    [queueAction],
+  );
 
-  // ── Eventos ───────────────────────────────────────────────
-  const addEvento = useCallback((e: Omit<EventoCalendario, "id">) => {
-    setData((d) => ({ ...d, eventos: [{ ...e, id: genId() }, ...d.eventos] }));
-  }, []);
-  const updateEvento = useCallback((id: string, e: Partial<EventoCalendario>) => {
-    setData((d) => ({
-      ...d,
-      eventos: d.eventos.map((x) => (x.id === id ? { ...x, ...e } : x)),
-    }));
-  }, []);
-  const removeEvento = useCallback((id: string) => {
-    setData((d) => ({ ...d, eventos: d.eventos.filter((x) => x.id !== id) }));
-  }, []);
+  // Eventos
+  const addEvento = useCallback(
+    (e: Omit<EventoCalendario, "id">) => {
+      const evento = { ...e, id: genId() };
+      setData((d) => ({ ...d, eventos: [evento, ...d.eventos] }));
+      queueAction({ type: "addEvento", evento });
+    },
+    [queueAction],
+  );
+  const updateEvento = useCallback(
+    (id: string, e: Partial<EventoCalendario>) => {
+      setData((d) => ({
+        ...d,
+        eventos: d.eventos.map((x) => (x.id === id ? { ...x, ...e } : x)),
+      }));
+      queueAction({ type: "updateEvento", id, evento: e });
+    },
+    [queueAction],
+  );
+  const removeEvento = useCallback(
+    (id: string) => {
+      setData((d) => ({
+        ...d,
+        eventos: d.eventos.filter((x) => x.id !== id),
+      }));
+      queueAction({ type: "removeEvento", id });
+    },
+    [queueAction],
+  );
 
   const resetDemo = useCallback(() => {
     setData(SEED);
-  }, []);
+    queueAction({ type: "resetDemo" });
+  }, [queueAction]);
 
   const value: StoreCtx = {
     hydrated,
+    syncError,
     data,
     addCliente,
     updateCliente,
