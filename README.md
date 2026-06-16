@@ -182,7 +182,7 @@ No. Cerrar sesión solo borra la cookie de acceso; los datos siguen en el navega
 Sí, es responsive. Pero al guardarse en `localStorage`, cada dispositivo tiene sus propios
 datos. Para datos compartidos, usa Supabase.
 
-**¿Cómo cambio el nombre “Propulsa”?**
+**¿Cómo cambio el nombre “Norte”?**
 Edita `APP_NAME` en `lib/config.ts`.
 
 **¿Es seguro?**
